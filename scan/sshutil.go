@@ -77,13 +77,12 @@ const sudo = true
 // NoSudo is Const value for normal user mode
 const noSudo = false
 
-func parallelSSHExec(fn func(osTypeInterface) error, timeoutSec ...int) (errs []error) {
-	resChan := make(chan string, len(servers))
-	errChan := make(chan error, len(servers))
-	defer close(errChan)
+func parallelExec(fn func(osTypeInterface) error, timeoutSec ...int) {
+	resChan := make(chan osTypeInterface, len(servers))
 	defer close(resChan)
 
 	for _, s := range servers {
+		// TODO skip if 0 < len(s.getErrs())
 		go func(s osTypeInterface) {
 			defer func() {
 				if p := recover(); p != nil {
@@ -92,14 +91,10 @@ func parallelSSHExec(fn func(osTypeInterface) error, timeoutSec ...int) (errs []
 				}
 			}()
 			if err := fn(s); err != nil {
-				errChan <- fmt.Errorf("%s@%s:%s: %s",
-					s.getServerInfo().User,
-					s.getServerInfo().Host,
-					s.getServerInfo().Port,
-					err,
-				)
+				s.setErrs([]error{err})
+				resChan <- s
 			} else {
-				resChan <- s.getServerInfo().GetServerName()
+				resChan <- s
 			}
 		}(s)
 	}
@@ -111,39 +106,33 @@ func parallelSSHExec(fn func(osTypeInterface) error, timeoutSec ...int) (errs []
 		timeout = timeoutSec[0]
 	}
 
-	var snames []string
+	var oses []osTypeInterface
 	isTimedout := false
 	for i := 0; i < len(servers); i++ {
 		select {
 		case s := <-resChan:
-			snames = append(snames, s)
-		case err := <-errChan:
-			errs = append(errs, err)
+			oses = append(oses, s)
 		case <-time.After(time.Duration(timeout) * time.Second):
 			isTimedout = true
 		}
 	}
 
-	// collect timed out servernames
-	var timedoutSnames []string
+	// set timed out error
 	if isTimedout {
 		for _, s := range servers {
 			name := s.getServerInfo().GetServerName()
 			found := false
-			for _, t := range snames {
-				if name == t {
+			for _, s := range oses {
+				if name == s.getServerInfo().GetServerName() {
 					found = true
 					break
 				}
 			}
 			if !found {
-				timedoutSnames = append(timedoutSnames, name)
+				err := fmt.Errorf("Timed out")
+				s.setErrs([]error{err})
 			}
 		}
-	}
-	if isTimedout {
-		errs = append(errs, fmt.Errorf(
-			"Timed out: %s", timedoutSnames))
 	}
 	return
 }

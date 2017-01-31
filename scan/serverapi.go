@@ -30,6 +30,7 @@ import (
 	"github.com/future-architect/vuls/config"
 	"github.com/future-architect/vuls/models"
 	"github.com/future-architect/vuls/report"
+	"github.com/k0kubun/pp"
 )
 
 // Log for localhsot
@@ -50,7 +51,7 @@ type osTypeInterface interface {
 	getLackDependencies() []string
 
 	checkIfSudoNoPasswd() error
-	detectPlatform() error
+	detectPlatform()
 	getPlatform() models.Platform
 
 	checkRequiredPackagesInstalled() error
@@ -89,10 +90,11 @@ func detectOS(c config.ServerInfo) (osType osTypeInterface) {
 
 	itsMe, osType, fatalErr = detectDebian(c)
 	if fatalErr != nil {
-		osType.setServerInfo(c)
-		osType.setErrs([]error{fatalErr})
 		return
-	} else if itsMe {
+	}
+
+	osType.setServerInfo(c)
+	if itsMe {
 		Log.Debugf("Debian like Linux. Host: %s:%s", c.Host, c.Port)
 		return
 	}
@@ -107,8 +109,6 @@ func detectOS(c config.ServerInfo) (osType osTypeInterface) {
 	}
 
 	//TODO darwin https://github.com/mizzy/specinfra/blob/master/lib/specinfra/helper/detect_os/darwin.rb
-
-	osType.setServerInfo(c)
 	osType.setErrs([]error{fmt.Errorf("Unknown OS Type")})
 	return
 }
@@ -340,13 +340,18 @@ func detectContainerOSesOnServer(containerHost osTypeInterface) (oses []osTypeIn
 // CheckIfSudoNoPasswd checks whether vuls can sudo with nopassword via SSH
 func CheckIfSudoNoPasswd(localLogger *logrus.Entry) error {
 	timeoutSec := 15
-	errs := parallelSSHExec(func(o osTypeInterface) error {
+	parallelExec(func(o osTypeInterface) error {
 		return o.checkIfSudoNoPasswd()
 	}, timeoutSec)
 
-	if 0 < len(errs) {
-		return fmt.Errorf(fmt.Sprintf("%s", errs))
+	for _, s := range servers {
+		fmt.Println(s.getErrs())
 	}
+	//TODO Error logic
+	//TODO Add detailed error message to o.CheckIfSudoNoPasswd
+	//  if 0 < len(errs) {
+	//      return fmt.Errorf(fmt.Sprintf("%s", errs))
+	//  }
 	return nil
 }
 
@@ -379,22 +384,32 @@ func DetectPlatforms(localLogger *logrus.Entry) {
 
 func detectPlatforms() []error {
 	timeoutSec := 1 * 60
-	return parallelSSHExec(func(o osTypeInterface) error {
-		return o.detectPlatform()
+	parallelExec(func(o osTypeInterface) error {
+		o.detectPlatform()
+		return nil
 	}, timeoutSec)
+	return nil
 }
 
 // Prepare installs requred packages to scan vulnerabilities.
 func Prepare() []error {
-	errs := parallelSSHExec(func(o osTypeInterface) error {
+	parallelExec(func(o osTypeInterface) error {
 		if err := o.checkDependencies(); err != nil {
 			return err
 		}
 		return nil
 	})
-	if len(errs) != 0 {
-		return errs
+	//TODO Error logic
+	//TODO Add detailed error message to o.detectPlatform
+	for _, s := range servers {
+		if 0 < len(s.getErrs()) {
+			//TODO Check if there are errors every servers
+			return s.getErrs()
+		}
 	}
+	//  if len(errs) != 0 {
+	//      return errs
+	//  }
 
 	var targets []osTypeInterface
 	for _, s := range servers {
@@ -437,15 +452,21 @@ func Prepare() []error {
 
 yes:
 	servers = targets
-	errs = parallelSSHExec(func(o osTypeInterface) error {
+	parallelExec(func(o osTypeInterface) error {
 		if err := o.install(); err != nil {
 			return err
 		}
 		return nil
 	})
-	if len(errs) != 0 {
-		return errs
+	for _, s := range servers {
+		if 0 < len(s.getErrs()) {
+			//TODO Check if there are errors every servers
+			return s.getErrs()
+		}
 	}
+	//  if len(errs) != 0 {
+	//      return errs
+	//  }
 	Log.Info("All dependencies were installed correctly")
 	return nil
 }
@@ -458,11 +479,11 @@ func Scan() []error {
 
 	Log.Info("Check required packages for scanning...")
 	if errs := checkRequiredPackagesInstalled(); errs != nil {
-		Log.Error("Please execute with [prepare] subcommand to install required packages before scanning")
+		Log.Errorf("Please execute with [prepare] subcommand to install required packages before scanning. %s", errs)
 		return errs
 	}
 
-	if err := setupCangelogCache(); err != nil {
+	if err := setupChangelogCache(); err != nil {
 		return []error{err}
 	}
 
@@ -485,7 +506,7 @@ func Scan() []error {
 	return nil
 }
 
-func setupCangelogCache() error {
+func setupChangelogCache() error {
 	needToSetupCache := false
 	for _, s := range servers {
 		switch s.getDistro().Family {
@@ -504,15 +525,23 @@ func setupCangelogCache() error {
 
 func checkRequiredPackagesInstalled() []error {
 	timeoutSec := 30 * 60
-	return parallelSSHExec(func(o osTypeInterface) error {
+	parallelExec(func(o osTypeInterface) error {
 		return o.checkRequiredPackagesInstalled()
 	}, timeoutSec)
+
+	for _, s := range servers {
+		if 0 < len(s.getErrs()) {
+			//TODO Check if there are errors every servers
+			return s.getErrs()
+		}
+	}
+	return nil
 }
 
 func scanVulns(jsonDir string, scannedAt time.Time) []error {
 	var results models.ScanResults
 	timeoutSec := 120 * 60
-	errs := parallelSSHExec(func(o osTypeInterface) error {
+	parallelExec(func(o osTypeInterface) error {
 		if err := o.scanPackages(); err != nil {
 			return err
 		}
@@ -527,6 +556,19 @@ func scanVulns(jsonDir string, scannedAt time.Time) []error {
 		return nil
 	}, timeoutSec)
 
+	//TODO
+	for _, s := range servers {
+		pp.Println(s.getErrs())
+	}
+
+	for _, s := range servers {
+		if 0 < len(s.getErrs()) {
+			//TODO Check if there are errors every servers
+			//  return s.getErrs()
+		}
+	}
+	//TODO write Error information to JSON/stdout summary
+
 	config.Conf.FormatJSON = true
 	ws := []report.ResultWriter{
 		report.LocalFileWriter{CurrentDir: jsonDir},
@@ -537,9 +579,6 @@ func scanVulns(jsonDir string, scannedAt time.Time) []error {
 				fmt.Errorf("Failed to write summary report: %s", err),
 			}
 		}
-	}
-	if errs != nil {
-		return errs
 	}
 
 	report.StdoutWriter{}.WriteScanSummary(results...)
